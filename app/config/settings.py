@@ -11,9 +11,13 @@ class Settings(BaseSettings):
     ELEVENLABS_MODEL: str
     GEMINI_API_KEY: str
     GEMINI_MODEL: str
-    FFMPEG_PATH: str
-    FFPROBE_PATH: str
-    STORAGE_PATH: Path = Path("storage")
+    FFMPEG_PATH: str = "ffmpeg"
+    FFPROBE_PATH: str = "ffprobe"
+    TEMP_DIR: Path = Path("tmp")
+    
+    SUPABASE_URL: str
+    SUPABASE_KEY: str
+    SUPABASE_BUCKET: str = "meditations"
 
     class Config:
         env_file = ".env"

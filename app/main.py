@@ -1,7 +1,7 @@
 import sys
 import asyncio
 from pathlib import Path
-from fastapi.staticfiles import StaticFiles
+
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -33,10 +33,6 @@ app.add_middleware(
 app.include_router(session.router, prefix="/session", tags=["Session"])
 app.include_router(meditation.router, prefix="/meditation", tags=["Meditation"])
 app.include_router(music.router, prefix="/music", tags=["Pregenerated Blocks"])
-
-# Mounting the audio blocks
-app.mount("/storage", StaticFiles(directory="storage"), name="storage")
-
 
 @app.on_event("startup")
 async def startup():

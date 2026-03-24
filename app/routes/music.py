@@ -6,6 +6,7 @@ from app.schemas.music import MusicCreate, MusicUpdate, MusicResponse
 from typing import List
 from pathlib import Path
 from app.config.settings import settings
+from app.services.supabase_storage import SupabaseStorage
 
 
 router = APIRouter()
@@ -21,19 +22,13 @@ async def create_music(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db)
 ):
-    music_dir = Path(settings.STORAGE_PATH) / "music"
-    music_dir.mkdir(parents=True, exist_ok=True)
-
+    # Upload directly to Supabase
     filename = file.filename
-    file_path = music_dir / filename
-
-    if file_path.exists():
-        raise HTTPException(status_code=400, detail="File with this name already exists")
-
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-
-    public_path = f"/storage/music/{filename}"
+    bucket_path = f"music/{filename}"
+    file_bytes = await file.read()
+    
+    storage = SupabaseStorage()
+    public_path = storage.upload_file_bytes(file_bytes, bucket_path, "audio/mpeg")
 
     music_create = MusicCreate(
         display_name=display_name,

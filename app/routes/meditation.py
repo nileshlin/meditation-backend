@@ -5,13 +5,15 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.gemini import GeminiService
 from app.services.crud import crud
-from app.services.audio2 import AudioBlockService
+from app.services.audio import AudioBlockService
 from app.schemas.meditation import MeditationResponse
 from app.database.models import MeditationStatus
 
 from app.config.logger import logger
 from app.database.db import get_db
 from app.config.settings import settings
+import httpx
+import os
 
 router = APIRouter()
 
@@ -31,16 +33,22 @@ async def generate_meditation_background(med_id: int, session_id: int, db: Async
         
         music = await crud.get_matching_music(db, summary)
         music_path = None
+        temp_music_path = None
         if music:
-            full_music_path = Path(settings.STORAGE_PATH) / str(music.path).replace("/storage/", "", 1)
-            if full_music_path.exists():
-                music_path = full_music_path
-                logger.info(f"Selected background music: {music.display_name} ({music.path})")
-            else:
-                logger.warning(f"Music file not found: {music.path}")
+            temp_music_path = Path(settings.TEMP_DIR) / f"temp_{music.id}.mp3"
+            temp_music_path.parent.mkdir(parents=True, exist_ok=True)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(music.path)
+                with open(temp_music_path, "wb") as f:
+                    f.write(resp.content)
+            music_path = temp_music_path
+            logger.info(f"Downloaded remote background music to: {temp_music_path}")
         
         audio_service = AudioBlockService()
         audio_blocks = await audio_service.generate_audio_blocks(scripts, meditation_id=med_id, music_path=music_path)
+        
+        if temp_music_path and temp_music_path.exists():
+            os.remove(temp_music_path)
         
         await crud.update_meditation(db, med_id, summary=summary, script=scripts, audio_blocks=audio_blocks, status=MeditationStatus.COMPLETED)
     except Exception as e:

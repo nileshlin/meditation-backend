@@ -5,6 +5,7 @@ import asyncio
 from pathlib import Path
 from app.config.settings import settings
 from app.config.logger import logger
+from app.services.supabase_storage import SupabaseStorage
 from typing import List, Dict, Optional
 
 
@@ -12,8 +13,9 @@ class AudioBlockService:
     def __init__(self):
         self.settings = settings
         self.voice_id = self.settings.ELEVENLABS_VOICE_ID
-        logger.info(f"AudioBlockService initialized with voice_id: Reigo Vilbiks voice ({self.voice_id})")
-        self.base_storage = Path(self.settings.STORAGE_PATH) / "audio_blocks"
+        self.storage = SupabaseStorage()
+        logger.info(f"AudioBlockService initialized with voice_id: {self.voice_id}")
+        self.base_storage = Path(self.settings.TEMP_DIR) / "audio_blocks"
         self.base_storage.mkdir(parents=True, exist_ok=True)
 
     async def generate_audio_blocks(
@@ -22,44 +24,79 @@ class AudioBlockService:
         meditation_id: int,
         music_path: Optional[Path] = None
     ) -> List[Dict]:
-    
+
         med_dir = self.base_storage / f"meditation_{meditation_id}"
         med_dir.mkdir(parents=True, exist_ok=True)
 
-        blocks_to_generate = [
-            {"number": 1, "duration": 90, "text": scripts[0]},
-            {"number": 2, "duration": 150, "text": scripts[1]},
-            {"number": 3, "duration": 90,  "text": scripts[2]},
-            {"number": 4, "duration": 120, "text": scripts[3]},
-            {"number": 5, "duration": 120, "text": scripts[4]},
+        block_definitions = [
+            {"number": 1,  "duration": 90,  "type": "tts",   "script_idx": 0},
+            {"number": 2,  "duration": 150, "type": "music", "script_idx": None},
+            {"number": 3,  "duration": 120, "type": "music", "script_idx": None},
+            {"number": 4,  "duration": 150, "type": "tts",   "script_idx": 1},
+            {"number": 5,  "duration": 90,  "type": "tts",   "script_idx": 2},
+            {"number": 6,  "duration": 150, "type": "music", "script_idx": None},
+            {"number": 7,  "duration": 120, "type": "tts",   "script_idx": 3},
+            {"number": 8,  "duration": 120, "type": "tts",   "script_idx": 4},
+            {"number": 9,  "duration": 90,  "type": "music", "script_idx": None},
+            {"number": 10, "duration": 120, "type": "music", "script_idx": None},
         ]
-    
+
         results = []
-        for block in blocks_to_generate:
-            logger.info(f"Generating block {block['number']} (meditation {meditation_id})")
 
-            base_audio_path = await self._generate_base_clip(
-                block['text'],
-                block['number'],
-                med_dir
-            )
+        for block_def in block_definitions:
+            block_num = block_def["number"]
+            duration_sec = block_def["duration"]
+            is_tts = block_def["type"] == "tts"
 
-            final_filename = f"block_{block['number']}.mp3"
+            logger.info(f"Processing block {block_num} ({'TTS' if is_tts else 'Music only'}) - {duration_sec}s")
+
+            final_filename = f"block_{block_num}.mp3"
             final_path = med_dir / final_filename
 
-            await self._loop_audio(
-                base_audio_path,
-                final_path,
-                block['duration'],
-                music_path
-            )
+            if is_tts:
+                # Generate TTS + mix with background music
+                script_text = scripts[block_def["script_idx"]]
+                base_audio_path = await self._generate_base_clip(
+                    text=script_text,
+                    block_number=block_num,
+                    med_dir=med_dir
+                )
+                await self._loop_audio(
+                    input_path=base_audio_path,
+                    output_path=final_path,
+                    duration_seconds=duration_sec,
+                    music_path=music_path,
+                    tts=is_tts
+                )
+            else:
+                if music_path and music_path.exists():
+                    await self._loop_audio(
+                        input_path=music_path,
+                        output_path=final_path,
+                        duration_seconds=duration_sec,
+                        music_path=None,
+                        tts=is_tts
+                    )
+                else:
+                    # Fallback: create silence if no music available
+                    logger.warning(f"No music available for block {block_num} → generating silence")
+                    await self._generate_silence(
+                        output_path=final_path,
+                        duration_seconds=duration_sec
+                    )
 
-            public_url = f"/storage/audio_blocks/meditation_{meditation_id}/{final_filename}"
+            bucket_path = f"meditation_{meditation_id}/{final_filename}"
+            public_url = self.storage.upload_file_path(final_path, bucket_path)
+
+            if final_path.exists():
+                os.remove(final_path)
 
             results.append({
-                "block": block['number'],
-                "duration": block['duration'],
+                "block": block_num,
+                "duration": duration_sec,
                 "url": public_url,
+                "type": block_def["type"],
+                "has_voice": is_tts,
                 "background_audio": music_path.name if music_path else None
             })
 
@@ -94,8 +131,8 @@ class AudioBlockService:
                 f.write(response.content)
 
         return base_path
-
-    async def _loop_audio(self, input_path: Path, output_path: Path, duration_seconds: int, music_path: Path = None):
+    
+    async def _loop_audio(self, input_path: Path, output_path: Path, duration_seconds: int, music_path: Path = None, tts: bool = False):
         duration_f = float(duration_seconds)
         wav_path = output_path.with_suffix(".temp.wav")
         
@@ -157,5 +194,20 @@ class AudioBlockService:
         
         if wav_path.exists():
             os.remove(wav_path)
-        if input_path.exists():
+        if input_path.exists() and tts:
             os.remove(input_path)
+
+    async def _generate_silence(self, output_path: Path, duration_seconds: int):
+        duration_f = float(duration_seconds)
+        cmd = [
+            self.settings.FFMPEG_PATH, "-y",
+            "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono:d={duration_f}",
+            "-c:a", "libmp3lame", "-b:a", "128k",
+            "-ar", "44100",
+            str(output_path)
+        ]
+        result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"Silence generation failed: {result.stderr}")
+            raise RuntimeError("Failed to generate silence")
+        logger.info(f"Generated silence block: {output_path} ({duration_f}s)")
