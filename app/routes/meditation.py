@@ -1,0 +1,94 @@
+from pathlib import Path
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.gemini import GeminiService
+from app.services.crud import crud
+from app.services.audio2 import AudioBlockService
+from app.schemas.meditation import MeditationResponse
+from app.database.models import MeditationStatus
+
+from app.config.logger import logger
+from app.database.db import get_db
+from app.config.settings import settings
+
+router = APIRouter()
+
+
+async def generate_meditation_background(med_id: int, session_id: int, db: AsyncSession):
+    try:
+        await crud.update_meditation(db, med_id, status=MeditationStatus.GENERATING)
+        session = await crud.get_session(db, session_id)
+        if not session:
+            raise ValueError("Session not found")
+        
+        messages = await crud.get_session_messages(db, session_id)
+        
+        gemini = GeminiService()
+        summary = await gemini.summarize_conversation(messages)       
+        scripts = await gemini.generate_meditation_script(summary)
+        
+        music = await crud.get_matching_music(db, summary)
+        music_path = None
+        if music:
+            full_music_path = Path(settings.STORAGE_PATH) / str(music.path).replace("/storage/", "", 1)
+            if full_music_path.exists():
+                music_path = full_music_path
+                logger.info(f"Selected background music: {music.display_name} ({music.path})")
+            else:
+                logger.warning(f"Music file not found: {music.path}")
+        
+        audio_service = AudioBlockService()
+        audio_blocks = await audio_service.generate_audio_blocks(scripts, meditation_id=med_id, music_path=music_path)
+        
+        await crud.update_meditation(db, med_id, summary=summary, script=scripts, audio_blocks=audio_blocks, status=MeditationStatus.COMPLETED)
+    except Exception as e:
+        logger.error(f"Meditation generation failed: {e}")
+        await crud.update_meditation(db, med_id, status=MeditationStatus.FAILED)
+
+@router.post("/sessions/{session_id}/start", response_model=MeditationResponse)
+async def start_meditation(session_id: int, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    session = await crud.get_session(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    meditation = await crud.create_meditation(db, session_id)
+    background_tasks.add_task(generate_meditation_background, meditation.id, session_id, db)
+    
+    return MeditationResponse(id=meditation.id, session_id=meditation.session_id, status=meditation.status.value)
+
+@router.get("/{med_id}", response_model=MeditationResponse)
+async def get_meditation(med_id: int, db: AsyncSession = Depends(get_db)):
+    meditation = await crud.get_meditation(db, med_id)
+    if not meditation:
+        raise HTTPException(status_code=404, detail="Meditation not found")
+    return MeditationResponse(
+        id=meditation.id,
+        session_id=meditation.session_id,
+        summary=meditation.summary,
+        script=meditation.script,
+        audio_blocks=meditation.audio_blocks,
+        status=meditation.status.value
+    )
+    
+@router.get("/", response_model=List[MeditationResponse])
+async def list_completed_meditations_full(
+    session_id: Optional[int] = Query(None),
+    limit: int = Query(20, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db)
+):
+    
+    meditations = await crud.list_completed_meditations(db, session_id, limit, offset)
+    return [
+        MeditationResponse(
+            id=m.id,
+            session_id=m.session_id,
+            summary=m.summary,
+            script=m.script,
+            audio_blocks=m.audio_blocks,
+            status=m.status.value
+        )
+        for m in meditations
+    ]
