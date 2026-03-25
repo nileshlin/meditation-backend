@@ -1,5 +1,5 @@
 import asyncio
-import csv
+import json
 from pathlib import Path
 
 # Adjust sys path so we can run directly as python scripts/seed_music.py
@@ -14,18 +14,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-def parse_csv_array(array_str):
-    """
-    Parses messy CSV array formats like:
-    "{""peaceful,focused,grounding""}" or "{aware,open,gentle}"
-    """
-    if not array_str:
-        return []
-    cleaned = array_str.strip('"{ }').replace('""', '')
-    if not cleaned:
-        return []
-    return [item.strip() for item in cleaned.split(',')]
-
 async def seed_music():
     print("Initializing Database...")
     async with engine.begin() as conn:
@@ -33,24 +21,24 @@ async def seed_music():
         
     storage = SupabaseStorage()
     
-    csv_file_path = Path("storage/background_music_dataset.csv")
-    if not csv_file_path.exists():
-        print(f"Dataset not found at {csv_file_path}")
+    json_file_path = Path("storage/music_catalog.json")
+    if not json_file_path.exists():
+        print(f"Catalog not found at {json_file_path}")
         return
 
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     
-    print(f"Reading dataset: {csv_file_path}")
+    print(f"Reading catalog: {json_file_path}")
     
-    with open(csv_file_path, newline='', encoding='utf-8') as csvfile:
-        reader = csv.DictReader(csvfile)
+    with open(json_file_path, "r", encoding="utf-8") as f:
+        catalog = json.load(f)
         
         async with async_session() as session:
-            for row in reader:
-                local_rel_path = row["path"] # e.g. "music/mindfulness_01.mp3"
+            for item in catalog:
+                local_rel_path = item["path"] # e.g. "music/mindfulness_01.mp3"
                 local_path = Path("storage") / local_rel_path
                 
-                print(f"Processing {row['display_name']} ...")
+                print(f"Processing {item['display_name']} ...")
                 
                 if not local_path.exists():
                     print(f" -> Local file missing at {local_path}. Skipping upload.")
@@ -60,29 +48,29 @@ async def seed_music():
                     public_url = storage.upload_file_path(local_path, local_rel_path)
                     print(f" -> Upload complete! URL: {public_url}")
 
-                moods = parse_csv_array(row["mood"])
-                tags = parse_csv_array(row["tags"])
+                moods = item["mood"]
+                tags = item["tags"]
 
                 # Check if exists
-                stmt = select(Music).where(Music.display_name == row["display_name"])
+                stmt = select(Music).where(Music.display_name == item["display_name"])
                 result = await session.execute(stmt)
                 existing = result.scalars().first()
                 
                 if existing:
-                    print(f" -> Updating existing DB record for {row['display_name']}")
+                    print(f" -> Updating existing DB record for {item['display_name']}")
                     existing.path = public_url
-                    existing.category = row["category"]
+                    existing.category = item["category"]
                     existing.mood = moods
-                    existing.description = row["description"]
+                    existing.description = item["description"]
                     existing.tags = tags
                 else:
-                    print(f" -> Creating new DB record for {row['display_name']}")
+                    print(f" -> Creating new DB record for {item['display_name']}")
                     new_music = Music(
-                        display_name=row["display_name"],
+                        display_name=item["display_name"],
                         path=public_url,
-                        category=row["category"],
+                        category=item["category"],
                         mood=moods,
-                        description=row["description"],
+                        description=item["description"],
                         tags=tags
                     )
                     session.add(new_music)

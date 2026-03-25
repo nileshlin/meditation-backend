@@ -14,3 +14,4 @@ asyncpg
 pydantic
 supabase
 asyncer
+streamlit

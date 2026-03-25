@@ -22,7 +22,8 @@ class AudioBlockService:
         self,
         scripts: List[str],
         meditation_id: int,
-        music_path: Optional[Path] = None
+        music_path: Optional[Path] = None,
+        progress_callback=None
     ) -> List[Dict]:
 
         med_dir = self.base_storage / f"meditation_{meditation_id}"
@@ -99,6 +100,10 @@ class AudioBlockService:
                 "has_voice": is_tts,
                 "background_audio": music_path.name if music_path else None
             })
+            
+            if progress_callback:
+                prog = int(40 + (50 * block_num / len(block_definitions)))
+                await progress_callback(prog)
 
         return results
 
@@ -134,66 +139,56 @@ class AudioBlockService:
     
     async def _loop_audio(self, input_path: Path, output_path: Path, duration_seconds: int, music_path: Path = None, tts: bool = False):
         duration_f = float(duration_seconds)
-        wav_path = output_path.with_suffix(".temp.wav")
         
         VOICE_VOLUME_DB = "+6.0"
         
-        wav_cmd = [
-            self.settings.FFMPEG_PATH, "-y",
-            "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono:d={duration_f}",
-            "-stream_loop", "-1",
-            "-i", str(input_path),
+        ffmpeg_cmd = [
+            self.settings.FFMPEG_PATH, "-y"
         ]
 
-        if music_path:
-            wav_cmd.extend([
-                "-stream_loop", "-1",
-                "-i", str(music_path)
+        if tts and music_path:
+            ffmpeg_cmd.extend([
+                "-i", str(input_path),
+                "-stream_loop", "-1", "-i", str(music_path),
+                "-filter_complex",
+                f"[0:a]volume={VOICE_VOLUME_DB}[v]; [1:a]volume=0.35[m]; [v][m]amix=inputs=2:duration=longest:dropout_transition=0",
+                "-c:a", "libmp3lame", "-b:a", "128k",
+                "-t", str(duration_f),
+                str(output_path)
             ])
-            filter_complex = (
-                f"[1:a]atrim=0:{duration_f},volume={VOICE_VOLUME_DB},loudnorm=I=-16:TP=-1.5:LRA=11[v]; "
-                f"[2:a]atrim=0:{duration_f},volume=0.35[m]; "
-                f"[0:a][v][m]amix=inputs=3:duration=first:dropout_transition=0"
-            )
+        elif tts and not music_path:
+            ffmpeg_cmd.extend([
+                "-i", str(input_path),
+                "-filter_complex", f"[0:a]volume={VOICE_VOLUME_DB},apad[v]",
+                "-map", "[v]",
+                "-c:a", "libmp3lame", "-b:a", "128k",
+                "-t", str(duration_f),
+                str(output_path)
+            ])
+        elif not tts and music_path:
+            ffmpeg_cmd.extend([
+                "-stream_loop", "-1", "-i", str(input_path),
+                "-filter_complex", f"[0:a]volume=0.35[m]",
+                "-map", "[m]",
+                "-c:a", "libmp3lame", "-b:a", "128k",
+                "-t", str(duration_f),
+                str(output_path)
+            ])
         else:
-            filter_complex = (
-                f"[1:a]atrim=0:{duration_f},volume={VOICE_VOLUME_DB},loudnorm=I=-16:TP=-1.5:LRA=11[v]; "
-                f"[0:a][v]amix=inputs=2:duration=first"
-            )
-
-        wav_cmd.extend([
-            "-filter_complex", filter_complex,
-            "-t", f"{duration_f}",
-            "-ar", "44100",
-            str(wav_path)
-        ])
+            await self._generate_silence(output_path, duration_seconds)
+            return
         
-        mp3_cmd = [
-            self.settings.FFMPEG_PATH, "-y",
-            "-i", str(wav_path),
-            "-c:a", "libmp3lame", "-b:a", "128k",
-            "-ar", "44100",
-            str(output_path)
-        ]
-        
-        def _execute(cmd, label):
-            logger.info(f"[{label}] Running: {' '.join(cmd)}")
+        def _execute(cmd):
+            logger.info(f"[AUDIO_MIX] Running: {' '.join(cmd)}")
             return subprocess.run(cmd, capture_output=True, text=True)
 
-        res1 = await asyncio.to_thread(_execute, wav_cmd, "WAV_MIX")
-        if res1.returncode != 0:
-            logger.error(f"WAV Mix failed: {res1.stderr}")
-            raise RuntimeError(f"WAV Mix failed for {wav_path}")
+        res = await asyncio.to_thread(_execute, ffmpeg_cmd)
+        if res.returncode != 0:
+            logger.error(f"Audio Mix failed: {res.stderr}")
+            raise RuntimeError(f"Audio Mix failed for {output_path}")
 
-        res2 = await asyncio.to_thread(_execute, mp3_cmd, "MP3_ENCODE")
-        if res2.returncode != 0:
-            logger.error(f"MP3 Encode failed: {res2.stderr}")
-            raise RuntimeError(f"MP3 Encode failed for {output_path}")
-        
         logger.info(f"Generated high-precision audio (Exact): {output_path} ({duration_f}s)")
         
-        if wav_path.exists():
-            os.remove(wav_path)
         if input_path.exists() and tts:
             os.remove(input_path)
 

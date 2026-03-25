@@ -16,3 +16,4 @@ class MeditationResponse(BaseModel):
     script: Optional[List[str]] = None
     audio_blocks: Optional[List[AudioBlock]] = None
     status: str
+    progress: int = 0

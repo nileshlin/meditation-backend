@@ -114,18 +114,16 @@ class CRUD:
         summary_lower = summary.lower()
         keywords = []
         
-        if any(k in summary_lower for k in ["nature", "forest", "rain", "ocean", "birds", "natural", "outdoor"]):
+        if any(k in summary_lower for k in ["nature", "forest", "rain", "ocean", "birds", "natural", "outdoor", "clear"]):
             keywords.append("nature")
-        if any(k in summary_lower for k in ["relax", "calm", "peace", "rest", "sleep", "sooth", "chill"]):
-            keywords.append("relax")
-        if any(k in summary_lower for k in ["mindful", "focus", "aware", "present", "still", "meditat"]):
+        if any(k in summary_lower for k in ["relax", "calm", "peace", "rest", "sleep", "sooth", "chill", "tired", "stress", "anxi", "racing", "wind-down"]):
+            keywords.append("relaxation")
+        if any(k in summary_lower for k in ["mindful", "focus", "aware", "present", "still", "meditat", "clarity", "attention"]):
             keywords.append("mindfulness")
 
         if not keywords:
-            logger.info("No matching keywords found in summary for music selection")
-            return None
+            logger.info("No matching keywords found in summary. Will fallback to a random track.")
 
-        # Build conditions safely
         conditions = []
 
         if keywords:
@@ -133,24 +131,19 @@ class CRUD:
                 or_(*(Music.category.ilike(f"%{kw}%") for kw in keywords))
             )
 
-        if keywords:
             conditions.append(
-                or_(*(any_(Music.mood) == kw for kw in keywords))
+                or_(*(func.array_to_string(Music.mood, ',').ilike(f"%{kw}%") for kw in keywords))
             )
 
-        if keywords:
             conditions.append(
-                or_(*(any_(Music.tags) == kw for kw in keywords))
+                or_(*(func.array_to_string(Music.tags, ',').ilike(f"%{kw}%") for kw in keywords))
             )
 
-        if not conditions:
-            return None
-
-        stmt = (
-            select(Music)
-            .where(or_(*conditions))
-            .limit(1)
-        )
+        stmt = select(Music)
+        if conditions:
+            stmt = stmt.where(or_(*conditions))
+            
+        stmt = stmt.order_by(func.random()).limit(1)
 
         result = await db.execute(stmt)
         music = result.scalar_one_or_none()
