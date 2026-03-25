@@ -109,6 +109,11 @@ class CRUD:
         stmt = select(Music)
         result = await db.execute(stmt)
         return result.scalars().all()
+    
+    async def get_random_music(self, db: AsyncSession) -> Optional[Music]:
+        stmt = select(Music).order_by(func.random()).limit(1)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def get_matching_music(self, db: AsyncSession, summary: str) -> Optional[Music]:
         summary_lower = summary.lower()
@@ -147,6 +152,10 @@ class CRUD:
 
         result = await db.execute(stmt)
         music = result.scalar_one_or_none()
+
+        if not music:
+            logger.info("No matching music found → falling back to random track")
+            music = await self.get_random_music(db)
 
         return music
 

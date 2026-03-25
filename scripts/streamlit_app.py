@@ -3,6 +3,7 @@ import requests
 import time
 
 BASE_URL = "http://localhost:8000"
+# BASE_URL = "https://meditation-backend-m92h.onrender.com"
 
 st.set_page_config(page_title="Meditation Audio Generator UI", page_icon="🧘", layout="centered")
 
